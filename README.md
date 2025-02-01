@@ -1,6 +1,34 @@
 # Message Transformer
 
-A configurable service that accepts JSON messages via REST API endpoints and transforms them to MQTT messages based on customizable rules.
+A Go application that transforms HTTP JSON messages to MQTT messages using configurable rules and templates.
+
+## Core Features
+
+### HTTP to MQTT Transformation
+- Accepts JSON messages via HTTP POST endpoints
+- Transforms messages using Go templates
+- Publishes transformed messages to MQTT topics
+- Health check endpoint for monitoring
+
+### Template Functions
+- `{{now}}` - Current UTC timestamp in RFC3339 format
+- `{{num .field}}` - Type-safe number handling
+- `{{bool .field}}` - Type-safe boolean handling
+- `{{toJSON .field}}` - Object to JSON string conversion
+- `{{fromJSON .field}}` - JSON string to object parsing
+
+### MQTT Features
+- TLS support with client certificates
+- Username/password authentication
+- Configurable QoS levels (0, 1, 2)
+- Message retention control
+- Automatic reconnection handling
+
+### Configuration
+- External application configuration (app.json)
+- Rule-based message transformation (JSON files)
+- Structured logging with levels
+- MQTT connection settings
 
 ## Project Structure
 
@@ -8,168 +36,99 @@ A configurable service that accepts JSON messages via REST API endpoints and tra
 message-transformer/
 ├── cmd/
 │   └── server/
-│       └── main.go                 # Application entry point and component orchestration
+│       └── main.go                 # Application entry point
 ├── config/
 │   ├── app.json                    # Main application configuration
 │   └── rules/                      # Rule configuration directory
-│       ├── sensor_data.json
-│       └── device_status.json
+│       ├── device-status.json      # Example rule configuration
+│       └── sensor-data.json        # Example rule configuration
 ├── internal/
 │   ├── api/
-│   │   ├── handler.go             # HTTP request handlers and error responses
-│   │   ├── middleware.go          # Structured logging middleware
-│   │   └── router.go              # Chi router setup and server configuration
+│   │   ├── handler.go             # HTTP request handlers
+│   │   ├── middleware.go          # Logging middleware
+│   │   └── router.go              # Chi router setup
 │   ├── config/
-│   │   ├── config.go              # Application configuration structures
-│   │   └── rule.go                # Rule configuration and loading
+│   │   ├── config.go              # Configuration handling
+│   │   └── rule.go                # Rule loading and validation
 │   ├── mqtt/
-│   │   └── client.go              # MQTT client with TLS and reconnection support
-│   ├── transformer/
-│   │   └── transformer.go         # Message transformation with type-safe template functions
-│   └── validator/
-│       └── validator.go           # Basic configuration and MQTT settings validation
-├── pkg/
-│   └── logger/
-│       └── logger.go              # Structured logging with Zap
-├── go.mod
-└── README.md
+│   │   └── client.go              # MQTT client implementation
+│   └── transformer/
+│       └── transformer.go          # Message transformation logic
+└── pkg/
+    └── logger/
+        └── logger.go              # Structured logging setup
 ```
-
-## Features
-
-### Currently Implemented
-
-- **HTTP API**
-  - Dynamic endpoints based on rule configuration
-  - Health check endpoint with MQTT connection status
-  - JSON request/response handling
-  - Structured error responses
-
-- **Message Transformation**
-  - JSON to JSON transformation using Go templates
-  - Type-safe template functions
-  - Template output validation
-
-- **Template Functions**
-  - `{{now}}` - Current UTC timestamp in RFC3339 format
-  - `{{num .value}}` - Safe number handling with type conversion
-  - `{{bool .value}}` - Safe boolean handling with type conversion
-  - `{{toJSON .object}}` - Convert object to JSON string
-  - `{{fromJSON .string}}` - Parse JSON string to object
-
-- **MQTT Integration**
-  - Secure connection with TLS support
-  - Client certificate authentication
-  - Username/password authentication
-  - Configurable QoS levels (0, 1, 2)
-  - Message retention control
-  - Automatic reconnection handling
-
-- **Configuration**
-  - External application configuration
-  - Directory-based rule loading
-  - MQTT connection settings
-  - Logging configuration
-
-- **Validation**
-  - JSON syntax validation
-  - Basic rule configuration validation
-  - MQTT settings validation (QoS, topic format)
-
-- **Logging**
-  - Structured logging with Zap
-  - Configurable output paths and formats
-  - Request/response logging
-  - Error tracking
-
-### Current Limitations
-
-- No dynamic URL parameters in API paths (e.g., cannot use /api/v1/devices/{id})
-- No array handling in templates (e.g., cannot iterate over lists)
-- No conditional logic in templates (no if/else statements)
-- No validation of input data against required template fields
-- No schema validation for incoming messages
-- Static MQTT topics only (no dynamic topic generation)
 
 ## Configuration
 
 ### Application Configuration (app.json)
 ```json
 {
-    "mqtt": {
-        "broker": "ssl://mqtt.example.com:8883",
-        "clientId": "message-transformer-prod-1",
-        "username": "transformer-service",
-        "password": "your-secure-password",
-        "tls": {
-            "enabled": true,
-            "caCert": "/etc/message-transformer/certs/ca.crt",
-            "cert": "/etc/message-transformer/certs/client.crt",
-            "key": "/etc/message-transformer/certs/client.key"
-        },
-        "reconnect": {
-            "initial": 3,
-            "maxDelay": 60,
-            "maxRetries": 10
-        }
+  "mqtt": {
+    "broker": "ssl://mqtt.example.com:8883",
+    "clientId": "message-transformer-1",
+    "username": "service-user",
+    "password": "service-password",
+    "tls": {
+      "enabled": true,
+      "caCert": "/etc/certs/ca.crt",
+      "cert": "/etc/certs/client.crt",
+      "key": "/etc/certs/client.key"
     },
-    "api": {
-        "host": "0.0.0.0",
-        "port": 8080
-    },
-    "rules": {
-        "directory": "/etc/message-transformer/rules"
-    },
-    "logger": {
-        "level": "info",
-        "outputPath": "/var/log/message-transformer/service.log",
-        "encoding": "json"
+    "reconnect": {
+      "initial": 3,
+      "maxDelay": 60,
+      "maxRetries": 10
     }
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "rules": {
+    "directory": "/etc/message-transformer/rules"
+  },
+  "logger": {
+    "level": "info",
+    "outputPath": "stdout",
+    "encoding": "json"
+  }
 }
 ```
 
 ### Rule Configuration Example
 ```json
 {
-    "sensor_data_transform": {
-        "id": "sensor-data-transform",
-        "description": "Transforms sensor data to new format",
-        "api": {
-            "method": "POST",
-            "path": "/api/v1/sensor-data"
-        },
-        "transform": {
-            "template": {
-                "deviceId": "{{.device_id}}",
-                "reading": {
-                    "type": "{{.sensor_type}}",
-                    "value": {{num .reading}},
-                    "unit": "{{.unit}}",
-                    "timestamp": "{{now}}"
-                },
-                "metadata": {
-                    "batteryLevel": {{num .battery_level}},
-                    "enabled": {{bool .enabled}}
-                }
-            }
-        },
-        "target": {
-            "topic": "devices/sensor-data/transformed",
-            "qos": 1,
-            "retain": false
-        }
-    }
+  "id": "device-status",
+  "description": "Transforms device status updates",
+  "api": {
+    "method": "POST",
+    "path": "/api/v1/device-status"
+  },
+  "transform": {
+    "template": "{\"deviceId\": \"{{.id}}\", \"status\": {\"state\": \"{{.current_state}}\", \"lastUpdated\": \"{{now}}\", \"batteryLevel\": {{num .battery}}, \"isOnline\": {{bool .online}}}}"
+  },
+  "target": {
+    "topic": "devices/status",
+    "qos": 1,
+    "retain": true
+  }
 }
 ```
 
 ## Building and Running
 
-1. Build the application:
+### Prerequisites
+- Go 1.21 or higher
+- MQTT broker (with TLS support if needed)
+- Write access to log directory (or use stdout)
+
+### Build
 ```bash
 go build -o message-transformer cmd/server/main.go
 ```
 
-2. Run with custom config:
+### Run
 ```bash
 ./message-transformer -config /path/to/config/app.json
 ```
@@ -177,87 +136,111 @@ go build -o message-transformer cmd/server/main.go
 ## API Usage
 
 ### Health Check
+Request:
 ```bash
 curl http://localhost:8080/health
 ```
+
 Response:
 ```json
 {
-    "status": "ok",
-    "mqtt_connected": true
+  "status": "ok",
+  "mqtt_connected": true
 }
 ```
 
-### Send Message
+### Transform Message
+Request:
 ```bash
-curl -X POST http://localhost:8080/api/v1/sensor-data \
+curl -X POST http://localhost:8080/api/v1/device-status \
   -H "Content-Type: application/json" \
   -d '{
-    "device_id": "sensor123",
-    "sensor_type": "temperature",
-    "reading": 23.5,
-    "unit": "celsius",
-    "battery_level": 85,
-    "enabled": true
+    "id": "device_123",
+    "current_state": "running",
+    "battery": 85.5,
+    "online": true
   }'
 ```
-Success Response:
+
+Response:
 ```json
 {
-    "status": "published",
-    "rule_id": "sensor-data-transform",
-    "transformed": {
-        "deviceId": "sensor123",
-        "reading": {
-            "type": "temperature",
-            "value": 23.5,
-            "unit": "celsius",
-            "timestamp": "2025-01-31T15:30:00Z"
-        },
-        "metadata": {
-            "batteryLevel": 85,
-            "enabled": true
-        }
+  "status": "published",
+  "rule_id": "device-status",
+  "transformed": {
+    "deviceId": "device_123",
+    "status": {
+      "state": "running",
+      "lastUpdated": "2025-01-31T15:30:00Z",
+      "batteryLevel": 85.5,
+      "isOnline": true
     }
+  }
 }
 ```
 
-## Error Responses
+## Error Handling
 
-- **400 Bad Request** - Invalid JSON or request body
+### Invalid JSON Request
 ```json
 {
-    "error": "Invalid JSON in request body"
+  "error": "Invalid JSON in request body"
 }
 ```
 
-- **422 Unprocessable Entity** - Transform error
+### Transform Error
 ```json
 {
-    "error": "Transform error: failed to execute template"
+  "error": "Transform error: failed to execute template"
 }
 ```
 
-- **503 Service Unavailable** - MQTT publishing failed
+### MQTT Publishing Error
 ```json
 {
-    "error": "Failed to publish message"
+  "error": "Failed to publish message"
 }
 ```
 
-## Development
+## Current Limitations
 
-### Required Dependencies
-- Go 1.21 or higher
-- MQTT Broker for testing (e.g., Mosquitto)
-- Access to write configuration files
+1. Template Restrictions:
+   - No array iteration support
+   - No conditional logic (if/else)
+   - No dynamic MQTT topics
 
-### Future Development
+2. API Restrictions:
+   - Only supports static paths (no URL parameters)
+   - POST method for transformations
+   - GET method for health check
 
-Areas identified for future improvement:
-1. Input validation against template requirements
-2. Dynamic URL parameter support
-3. Array handling in templates
-4. Conditional logic in templates
-5. Dynamic MQTT topic generation
-6. Message schema validation
+3. Validation:
+   - Basic JSON syntax validation
+   - Template syntax validation
+   - No schema validation for messages
+
+## Monitoring
+
+### Health Check Endpoint
+- Provides service status
+- Reports MQTT connection state
+- Available at /health
+
+### Logging
+- Structured JSON logging
+- Configurable log levels
+- Request/response logging
+- Error tracking with stack traces
+
+## Security Features
+
+### TLS Support
+- MQTT TLS connection
+- Client certificate authentication
+- Custom CA certificate support
+- Strong cipher suites
+
+### Authentication
+- MQTT username/password
+- Configurable credentials
+- Secure credential handling

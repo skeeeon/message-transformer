@@ -1,248 +1,189 @@
 ## Rule Examples
 
-### 1. Basic Device Status
+### 1. Device Status Rule
 
 This rule transforms device status updates into a standardized format.
 
 ```json
 {
-    "device_status": {
-        "id": "device-status",
-        "description": "Standardizes device status updates",
-        "api": {
-            "method": "POST",
-            "path": "/api/v1/device-status"
-        },
-        "transform": {
-            "template": {
-                "deviceId": "{{.id}}",
-                "status": {
-                    "state": "{{.current_state}}",
-                    "lastUpdated": "{{now}}",
-                    "batteryLevel": {{num .battery}},
-                    "isOnline": {{bool .online}}
-                }
-            }
-        },
-        "target": {
-            "topic": "devices/status",
-            "qos": 1,
-            "retain": true
-        }
-    }
+  "id": "device-status",
+  "description": "Standardizes device status updates",
+  "api": {
+    "method": "POST",
+    "path": "/api/v1/device-status"
+  },
+  "transform": {
+    "template": "{\"deviceId\": \"{{.id}}\", \"status\": {\"state\": \"{{.current_state}}\", \"lastUpdated\": \"{{now}}\", \"batteryLevel\": {{num .battery}}, \"isOnline\": {{bool .online}}}}"
+  },
+  "target": {
+    "topic": "devices/status",
+    "qos": 1,
+    "retain": true
+  }
 }
 ```
 
 Example Input:
 ```json
 {
-    "id": "device_123",
-    "current_state": "running",
-    "battery": 85.5,
-    "online": true
+  "id": "device_123",
+  "current_state": "running",
+  "battery": 85.5,
+  "online": true
 }
 ```
 
 Example Output (Published to MQTT):
 ```json
 {
-    "deviceId": "device_123",
-    "status": {
-        "state": "running",
-        "lastUpdated": "2025-01-31T15:30:00Z",
-        "batteryLevel": 85.5,
-        "isOnline": true
-    }
+  "deviceId": "device_123",
+  "status": {
+    "state": "running",
+    "lastUpdated": "2025-01-31T15:30:00Z",
+    "batteryLevel": 85.5,
+    "isOnline": true
+  }
 }
 ```
 
-### 2. Sensor Reading Transformation
+### 2. Sensor Reading Rule
 
-This rule transforms legacy sensor readings into a new format with metadata.
+This rule transforms sensor readings with metadata handling.
 
 ```json
 {
-    "sensor_reading": {
-        "id": "sensor-reading",
-        "description": "Transforms legacy sensor readings to new format",
-        "api": {
-            "method": "POST",
-            "path": "/api/v1/sensor"
-        },
-        "transform": {
-            "template": {
-                "sensorId": "{{.sensor_id}}",
-                "measurement": {
-                    "type": "{{.type}}",
-                    "value": {{num .value}},
-                    "unit": "{{.unit}}",
-                    "timestamp": "{{now}}"
-                },
-                "metadata": {{toJSON .meta}},
-                "quality": {
-                    "isValid": {{bool .valid}},
-                    "signalStrength": {{num .signal_strength}}
-                }
-            }
-        },
-        "target": {
-            "topic": "sensors/data",
-            "qos": 2,
-            "retain": false
-        }
-    }
+  "id": "sensor-reading",
+  "description": "Transforms sensor readings with metadata",
+  "api": {
+    "method": "POST",
+    "path": "/api/v1/sensor"
+  },
+  "transform": {
+    "template": "{\"sensorId\": \"{{.sensor_id}}\", \"measurement\": {\"type\": \"{{.type}}\", \"value\": {{num .value}}, \"timestamp\": \"{{now}}\"}, \"metadata\": {{toJSON .meta}}, \"active\": {{bool .active}}}"
+  },
+  "target": {
+    "topic": "sensors/data",
+    "qos": 2,
+    "retain": false
+  }
 }
 ```
 
 Example Input:
 ```json
 {
-    "sensor_id": "TEMP001",
+  "sensor_id": "TEMP001",
+  "type": "temperature",
+  "value": 23.6,
+  "meta": {
+    "location": "room_1",
+    "floor": "ground"
+  },
+  "active": true
+}
+```
+
+Example Output (Published to MQTT):
+```json
+{
+  "sensorId": "TEMP001",
+  "measurement": {
     "type": "temperature",
     "value": 23.6,
-    "unit": "celsius",
-    "meta": {
-        "location": "room_1",
-        "floor": "ground"
-    },
-    "valid": true,
-    "signal_strength": 92
+    "timestamp": "2025-01-31T15:30:00Z"
+  },
+  "metadata": {
+    "location": "room_1",
+    "floor": "ground"
+  },
+  "active": true
 }
 ```
 
-Example Output (Published to MQTT):
-```json
-{
-    "sensorId": "TEMP001",
-    "measurement": {
-        "type": "temperature",
-        "value": 23.6,
-        "unit": "celsius",
-        "timestamp": "2025-01-31T15:30:00Z"
-    },
-    "metadata": {
-        "location": "room_1",
-        "floor": "ground"
-    },
-    "quality": {
-        "isValid": true,
-        "signalStrength": 92
-    }
-}
-```
+### 3. Alert Processing Rule
 
-### 3. Alert Normalization
-
-This rule normalizes alerts from different systems into a standard format.
+This rule processes alerts with JSON string parsing.
 
 ```json
 {
-    "alert_normalizer": {
-        "id": "alert-normalizer",
-        "description": "Normalizes alerts from various systems",
-        "api": {
-            "method": "POST",
-            "path": "/api/v1/alerts"
-        },
-        "transform": {
-            "template": {
-                "alertId": "{{.alert_id}}",
-                "source": "{{.system}}",
-                "severity": "{{.level}}",
-                "details": {{toJSON .details}},
-                "timestamp": "{{now}}",
-                "acknowledgement": {
-                    "required": {{bool .needs_ack}},
-                    "timeout": {{num .ack_timeout}}
-                }
-            }
-        },
-        "target": {
-            "topic": "alerts/normalized",
-            "qos": 2,
-            "retain": true
-        }
-    }
+  "id": "alert-processor",
+  "description": "Processes alerts with JSON details",
+  "api": {
+    "method": "POST",
+    "path": "/api/v1/alerts"
+  },
+  "transform": {
+    "template": "{\"alertId\": \"{{.id}}\", \"type\": \"{{.type}}\", \"details\": {{fromJSON .details_json}}, \"timestamp\": \"{{now}}\", \"critical\": {{bool .is_critical}}}"
+  },
+  "target": {
+    "topic": "system/alerts",
+    "qos": 1,
+    "retain": true
+  }
 }
 ```
 
 Example Input:
 ```json
 {
-    "alert_id": "ALT_456",
-    "system": "HVAC",
-    "level": "critical",
-    "details": {
-        "code": "HIGH_TEMP",
-        "message": "Temperature exceeded threshold",
-        "location": "Server Room"
-    },
-    "needs_ack": true,
-    "ack_timeout": 300
+  "id": "ALT_123",
+  "type": "system_error",
+  "details_json": "{\"code\": \"ERR_001\", \"message\": \"Disk space low\"}",
+  "is_critical": true
 }
 ```
 
 Example Output (Published to MQTT):
 ```json
 {
-    "alertId": "ALT_456",
-    "source": "HVAC",
-    "severity": "critical",
-    "details": {
-        "code": "HIGH_TEMP",
-        "message": "Temperature exceeded threshold",
-        "location": "Server Room"
-    },
-    "timestamp": "2025-01-31T15:30:00Z",
-    "acknowledgement": {
-        "required": true,
-        "timeout": 300
-    }
+  "alertId": "ALT_123",
+  "type": "system_error",
+  "details": {
+    "code": "ERR_001",
+    "message": "Disk space low"
+  },
+  "timestamp": "2025-01-31T15:30:00Z",
+  "critical": true
 }
 ```
 
-### Template Function Usage Notes
+### Currently Implemented Template Functions
 
-1. **String Values** (`{{.field_name}}`)
-   - Direct string substitution
-   - Used for text fields that don't need type conversion
-   - Example: `"deviceId": "{{.id}}"`
-
-2. **Numeric Values** (`{{num .field_name}}`)
-   - Safely handles integers and floating-point numbers
-   - Converts string numbers to proper JSON numbers
-   - Example: `"temperature": {{num .temp}}`
-
-3. **Boolean Values** (`{{bool .field_name}}`)
-   - Converts various inputs to true/false
-   - Handles "true"/"false" strings
-   - Example: `"active": {{bool .is_active}}`
-
-4. **JSON Objects** (`{{toJSON .field_name}}`)
-   - Preserves object structure
-   - Useful for nested data
-   - Example: `"metadata": {{toJSON .meta}}`
-
-5. **Timestamps** (`{{now}}`)
-   - Inserts current UTC timestamp
-   - Format: RFC3339
+1. `{{now}}` - Generates current UTC timestamp in RFC3339 format
    - Example: `"timestamp": "{{now}}"`
+   - Output: `"timestamp": "2025-01-31T15:30:00Z"`
 
-### Error Handling in Templates
+2. `{{num .field}}` - Safe number handling
+   - Example: `"value": {{num .reading}}`
+   - Handles integers and floating-point numbers
+   - Returns "0" for invalid numbers
 
-Common error scenarios and their handling:
+3. `{{bool .field}}` - Safe boolean handling
+   - Example: `"active": {{bool .status}}`
+   - Converts various inputs to true/false
+   - Returns "false" for invalid values
 
-1. **Missing Fields**
-   - String fields: Empty string
-   - Numeric fields: 0
-   - Boolean fields: false
-   - Object fields: null
+4. `{{toJSON .field}}` - Convert object to JSON string
+   - Example: `"metadata": {{toJSON .meta}}`
+   - Preserves object structure
+   - Returns "null" for invalid JSON
 
-2. **Type Mismatches**
-   - Invalid numbers: 0
-   - Invalid booleans: false
-   - Invalid JSON: null
+5. `{{fromJSON .field}}` - Parse JSON string to object
+   - Example: `"details": {{fromJSON .details_json}}`
+   - Converts JSON string to object
+   - Returns null for invalid JSON
 
-3. **JSON Syntax**
-   - Invalid template output: Transform error response
-   - Invalid input JSON: 400 Bad Request
+### Important Notes
+
+1. Template Formatting:
+   - Template must be a valid JSON string with escaped quotes
+   - Use `\"` for quotes within the template
+
+2. Static Elements:
+   - MQTT topics are static strings
+   - API paths are static (no URL parameters)
+
+3. Data Types:
+   - Use `num` for any numeric fields
+   - Use `bool` for any boolean fields
+   - Use `toJSON`/`fromJSON` for object handling
