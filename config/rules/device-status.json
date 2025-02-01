@@ -1,0 +1,16 @@
+{
+  "id": "device-status",
+  "description": "Standardizes device status updates",
+  "api": {
+    "method": "POST",
+    "path": "/api/v1/device-status"
+  },
+  "transform": {
+    "template": "{\"deviceId\": \"{{.id}}\", \"status\": {\"state\": \"{{.current_state}}\", \"lastUpdated\": \"{{now}}\", \"batteryLevel\": {{num .battery}}, \"isOnline\": {{bool .online}}}}"
+  },
+  "target": {
+    "topic": "devices/status",
+    "qos": 1,
+    "retain": true
+  }
+}

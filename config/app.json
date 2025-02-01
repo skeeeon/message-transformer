@@ -1,0 +1,31 @@
+{
+    "mqtt": {
+        "broker": "tcp://haos.int.stone-age.io:1883",
+        "clientId": "message-transformer-prod-1",
+        "username": "transformer",
+        "password": "transformer",
+        "tls": {
+            "enabled": false,
+            "caCert": "/etc/message-transformer/certs/ca.crt",
+            "cert": "/etc/message-transformer/certs/client.crt",
+            "key": "/etc/message-transformer/certs/client.key"
+        },
+        "reconnect": {
+            "initial": 3,
+            "maxDelay": 60,
+            "maxRetries": 10
+        }
+    },
+    "api": {
+        "host": "0.0.0.0",
+        "port": 3333
+    },
+    "rules": {
+        "directory": "/home/ubuntu/message-transformer/config/rules"
+    },
+    "logger": {
+        "level": "info",
+        "outputPath": "/home/ubuntu/message-transformer/service.log",
+        "encoding": "json"
+    }
+}
