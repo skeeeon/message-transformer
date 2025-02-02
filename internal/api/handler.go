@@ -13,6 +13,10 @@ import (
 	"message-transformer/internal/transformer"
 )
 
+const (
+	maxRequestSize = 1 << 20 // 1MB
+)
+
 // handleHealth returns a handler for health check requests
 func (s *Server) handleHealth() http.HandlerFunc {
 	type healthResponse struct {
@@ -21,37 +25,66 @@ func (s *Server) handleHealth() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Get or create buffered writer
+		var bw ResponseWriter
+		if buffered, ok := w.(ResponseWriter); ok {
+			bw = buffered
+		} else {
+			buffer := s.bufferPool.Get().([]byte)
+			buffered := newBufferedResponseWriter(w, buffer)
+			defer func() {
+				buffered.Flush()
+				s.bufferPool.Put(buffer)
+			}()
+			bw = buffered
+		}
+
 		resp := healthResponse{
 			Status:    "ok",
 			MQTTConn: s.mqtt.IsConnected(),
 		}
-		JSONResponse(w, http.StatusOK, resp)
+		JSONResponse(bw, http.StatusOK, resp)
 	}
 }
 
 // handleTransform returns a handler for transformation requests
 func (s *Server) handleTransform(rule config.Rule) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Read request body
-		body, err := io.ReadAll(r.Body)
+		// Get or create buffered writer
+		var bw ResponseWriter
+		if buffered, ok := w.(ResponseWriter); ok {
+			bw = buffered
+		} else {
+			buffer := s.bufferPool.Get().([]byte)
+			buffered := newBufferedResponseWriter(w, buffer)
+			defer func() {
+				buffered.Flush()
+				s.bufferPool.Put(buffer)
+			}()
+			bw = buffered
+		}
+
+		// Read request body with size limit
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestSize))
 		if err != nil {
 			s.logger.Error("Failed to read request body",
 				zap.Error(err),
 				zap.String("rule_id", rule.ID))
-			SendError(w, http.StatusBadRequest, "Failed to read request body")
+			SendError(bw, http.StatusBadRequest, "Failed to read request body")
 			return
 		}
+		defer r.Body.Close()
 
-		// Verify the input is valid JSON
+		// Verify the input is valid JSON before processing
 		if !json.Valid(body) {
 			s.logger.Error("Invalid JSON in request body",
 				zap.String("rule_id", rule.ID))
-			SendError(w, http.StatusBadRequest, "Invalid JSON in request body")
+			SendError(bw, http.StatusBadRequest, "Invalid JSON in request body")
 			return
 		}
 
-		// Transform message
-		transformed, err := s.transformer.Transform(rule.Transform.Template, body)
+		// Transform message using pre-compiled template
+		transformed, err := s.transformer.Transform(rule.ID, body)
 		if err != nil {
 			var transformErr *transformer.TransformError
 			if errors.As(err, &transformErr) {
@@ -59,14 +92,14 @@ func (s *Server) handleTransform(rule config.Rule) http.HandlerFunc {
 					zap.Error(transformErr.Err),
 					zap.String("message", transformErr.Message),
 					zap.String("rule_id", rule.ID))
-				SendError(w, http.StatusUnprocessableEntity, 
+				SendError(bw, http.StatusUnprocessableEntity,
 					fmt.Sprintf("Transform error: %s", transformErr.Message))
 				return
 			}
 			s.logger.Error("Unexpected transform error",
 				zap.Error(err),
 				zap.String("rule_id", rule.ID))
-			SendError(w, http.StatusInternalServerError, "Internal server error")
+			SendError(bw, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 
@@ -81,15 +114,22 @@ func (s *Server) handleTransform(rule config.Rule) http.HandlerFunc {
 				zap.Error(err),
 				zap.String("rule_id", rule.ID),
 				zap.String("topic", rule.Target.Topic))
-			SendError(w, http.StatusServiceUnavailable, "Failed to publish message")
+			SendError(bw, http.StatusServiceUnavailable, "Failed to publish message")
+			return
+		}
+
+		// Parse transformed data for response
+		var preview interface{}
+		if err := json.Unmarshal(transformed, &preview); err != nil {
+			s.logger.Error("Failed to parse transformed data for response",
+				zap.Error(err),
+				zap.String("rule_id", rule.ID))
+			SendError(bw, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 
 		// Return success response with transformed data preview
-		var preview interface{}
-		_ = json.Unmarshal(transformed, &preview) // Error already checked in transformer
-
-		JSONResponse(w, http.StatusOK, struct {
+		JSONResponse(bw, http.StatusOK, struct {
 			Status      string      `json:"status"`
 			RuleID      string      `json:"rule_id"`
 			Transformed interface{} `json:"transformed"`

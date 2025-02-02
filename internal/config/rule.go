@@ -1,3 +1,4 @@
+//internal/config/rule.go
 package config
 
 import (

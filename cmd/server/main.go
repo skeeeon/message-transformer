@@ -50,8 +50,11 @@ func main() {
 	}
 	log.Info("Rules loaded successfully", zap.Int("count", len(rules)))
 
-	// Initialize transformer
-	transform := transformer.New(log)
+	// Initialize transformer with pre-compiled templates
+	transform, err := transformer.New(log, rules)
+	if err != nil {
+		log.Fatal("Failed to initialize transformer", zap.Error(err))
+	}
 
 	// Initialize MQTT client
 	mqttClient, err := mqtt.New(mqtt.Config{
@@ -77,10 +80,19 @@ func main() {
 	defer mqttClient.Close()
 
 	// Initialize HTTP server
-	server := api.NewServer(log, rules, transform, mqttClient)
+	server := api.NewServer(api.ServerConfig{
+		Logger:      log,
+		Rules:       rules,
+		Transformer: transform,
+		MQTT:        mqttClient,
+	})
+
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.API.Host, cfg.API.Port),
-		Handler: server,
+		Addr:           fmt.Sprintf("%s:%d", cfg.API.Host, cfg.API.Port),
+		Handler:        server,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1MB
 	}
 
 	// Start HTTP server in a goroutine

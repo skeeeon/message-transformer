@@ -5,16 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 	"text/template"
 	"time"
 
 	"go.uber.org/zap"
+
+	"message-transformer/internal/config"
 )
 
-// Transformer handles message transformations
+// Transformer handles message transformations with pre-compiled templates
 type Transformer struct {
-	logger        *zap.Logger
-	templateCache map[string]*template.Template
+	logger    *zap.Logger
+	templates sync.Map // thread-safe map for template access
+}
+
+// CompiledTemplate wraps a pre-compiled template with metadata
+type CompiledTemplate struct {
+	Template *template.Template
+	ID       string
 }
 
 type TransformError struct {
@@ -26,69 +35,9 @@ func (e *TransformError) Error() string {
 	return fmt.Sprintf("%s: %v", e.Message, e.Err)
 }
 
-// New creates a new transformer
-func New(logger *zap.Logger) *Transformer {
-	return &Transformer{
-		logger:        logger,
-		templateCache: make(map[string]*template.Template),
-	}
-}
-
-// Transform applies a template transformation to the input data
-func (t *Transformer) Transform(templateStr string, inputData []byte) ([]byte, error) {
-	// Parse input data into a map for template access
-	var data map[string]interface{}
-	decoder := json.NewDecoder(bytes.NewReader(inputData))
-	decoder.UseNumber() // Use json.Number for numbers to preserve precision
-	if err := decoder.Decode(&data); err != nil {
-		return nil, &TransformError{
-			Message: "failed to parse input data",
-			Err:     err,
-		}
-	}
-
-	// Get or create template
-	tmpl, err := t.getTemplate(templateStr)
-	if err != nil {
-		return nil, &TransformError{
-			Message: "failed to parse template",
-			Err:     err,
-		}
-	}
-
-	// Execute template
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return nil, &TransformError{
-			Message: "failed to execute template",
-			Err:     err,
-		}
-	}
-
-	// Validate output is valid JSON
-	var output interface{}
-	if err := json.Unmarshal(buf.Bytes(), &output); err != nil {
-		return nil, &TransformError{
-			Message: "template output is not valid JSON",
-			Err:     err,
-		}
-	}
-
-	t.logger.Debug("Message transformed successfully",
-		zap.Any("input", data),
-		zap.Any("output", output))
-
-	return buf.Bytes(), nil
-}
-
-// getTemplate retrieves a cached template or creates a new one
-func (t *Transformer) getTemplate(templateStr string) (*template.Template, error) {
-	if tmpl, ok := t.templateCache[templateStr]; ok {
-		return tmpl, nil
-	}
-
-	// Create new template with custom functions
-	tmpl, err := template.New("transform").Funcs(template.FuncMap{
+// templateFuncs returns the common template functions
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
 		"toJSON": func(v interface{}) string {
 			b, err := json.Marshal(v)
 			if err != nil {
@@ -121,13 +70,12 @@ func (t *Transformer) getTemplate(templateStr string) (*template.Template, error
 			case int32:
 				return strconv.FormatInt(int64(n), 10)
 			case string:
-				// Try to parse as number
 				if _, err := strconv.ParseFloat(n, 64); err == nil {
 					return n
 				}
-				return "0" // Default to 0 if not a valid number
+				return "0"
 			default:
-				return "0" // Default to 0 for non-numeric types
+				return "0"
 			}
 		},
 		"bool": func(v interface{}) string {
@@ -140,24 +88,117 @@ func (t *Transformer) getTemplate(templateStr string) (*template.Template, error
 				}
 				return "false"
 			case int, int64, float64:
-				return "true" // Non-zero numbers are true
+				return "true"
 			case nil:
 				return "false"
 			default:
 				return "false"
 			}
 		},
-	}).Parse(templateStr)
-
-	if err != nil {
-		return nil, err
 	}
-
-	t.templateCache[templateStr] = tmpl
-	return tmpl, nil
 }
 
-// ClearCache clears the template cache
-func (t *Transformer) ClearCache() {
-	t.templateCache = make(map[string]*template.Template)
+// New creates a new transformer with pre-compiled templates
+func New(logger *zap.Logger, rules []config.Rule) (*Transformer, error) {
+	t := &Transformer{
+		logger: logger,
+	}
+
+	// Pre-compile all templates at startup
+	for _, rule := range rules {
+		if err := t.compileTemplate(rule.ID, rule.Transform.Template); err != nil {
+			return nil, fmt.Errorf("failed to compile template for rule %s: %w", rule.ID, err)
+		}
+	}
+
+	return t, nil
+}
+
+// compileTemplate compiles a template and stores it in the sync.Map
+func (t *Transformer) compileTemplate(id, templateStr string) error {
+	tmpl, err := template.New(id).
+		Funcs(templateFuncs()).
+		Parse(templateStr)
+	if err != nil {
+		return err
+	}
+
+	t.templates.Store(id, &CompiledTemplate{
+		Template: tmpl,
+		ID:       id,
+	})
+	return nil
+}
+
+// Transform applies a pre-compiled template transformation to the input data
+func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error) {
+	// Get pre-compiled template
+	tmplValue, exists := t.templates.Load(ruleID)
+	if !exists {
+		return nil, &TransformError{
+			Message: "template not found",
+			Err:     fmt.Errorf("no template for rule %s", ruleID),
+		}
+	}
+	compiledTmpl := tmplValue.(*CompiledTemplate)
+
+	// Parse input data using a decoder for precise number handling
+	var data map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(inputData))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
+		return nil, &TransformError{
+			Message: "failed to parse input data",
+			Err:     err,
+		}
+	}
+
+	// Execute template with buffer pool for efficiency
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if err := compiledTmpl.Template.Execute(buf, data); err != nil {
+		return nil, &TransformError{
+			Message: "failed to execute template",
+			Err:     err,
+		}
+	}
+
+	// Validate output is valid JSON
+	output := buf.Bytes()
+	if !json.Valid(output) {
+		return nil, &TransformError{
+			Message: "template output is not valid JSON",
+			Err:     fmt.Errorf("invalid JSON output for rule %s", ruleID),
+		}
+	}
+
+	// Create a copy of the output since we're returning the buffer to the pool
+	result := make([]byte, len(output))
+	copy(result, output)
+
+	t.logger.Debug("Message transformed successfully",
+		zap.String("rule_id", ruleID),
+		zap.Int("input_size", len(inputData)),
+		zap.Int("output_size", len(result)))
+
+	return result, nil
+}
+
+// Buffer pool for template execution
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
+// AddTemplate adds a new template at runtime (useful for dynamic rule updates)
+func (t *Transformer) AddTemplate(id, templateStr string) error {
+	return t.compileTemplate(id, templateStr)
+}
+
+// RemoveTemplate removes a template (useful for rule cleanup)
+func (t *Transformer) RemoveTemplate(id string) {
+	t.templates.Delete(id)
 }
