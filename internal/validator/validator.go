@@ -1,4 +1,5 @@
-//internal/validator/validator.go
+//file: internal/validator/validator.go
+
 package validator
 
 import (
@@ -93,7 +94,6 @@ func (v *Validator) ValidateAPIPath(path string) error {
 	if !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("API path must start with /")
 	}
-	// Add more path validation as needed
 	return nil
 }
 
@@ -103,9 +103,17 @@ func (v *Validator) ValidateTemplate(templateStr string) error {
 		return fmt.Errorf("%w: template is empty", ErrInvalidTemplate)
 	}
 
-	// Try parsing the template to validate syntax
-	_, err := template.New("validator").Parse(templateStr)
-	if err != nil {
+	// Create template with all supported functions for validation
+	tmpl := template.New("validator").Funcs(template.FuncMap{
+		"toJSON": func(v interface{}) string { return "" },
+		"fromJSON": func(s string) interface{} { return nil },
+		"now": func() string { return "" },
+		"uuid7": func() string { return "00000000-0000-7000-0000-000000000000" },
+		"num": func(v interface{}) string { return "0" },
+		"bool": func(v interface{}) string { return "false" },
+	})
+
+	if _, err := tmpl.Parse(templateStr); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidTemplate, err)
 	}
 
@@ -138,13 +146,5 @@ func (v *Validator) ValidatePayload(payload []byte, rule config.Rule) error {
 	if len(payload) == 0 {
 		return fmt.Errorf("empty payload")
 	}
-
-	// Add custom payload validation logic here
-	// For example:
-	// - Size limits
-	// - Content type validation
-	// - Schema validation
-	// - Custom rule-specific validation
-
 	return nil
 }

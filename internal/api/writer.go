@@ -1,3 +1,5 @@
+//file: internal/api/writer.go
+
 package api
 
 import (

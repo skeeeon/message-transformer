@@ -1,3 +1,5 @@
+//file: internal/transformer/transformer.go
+
 package transformer
 
 import (
@@ -9,6 +11,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"message-transformer/internal/config"
@@ -26,6 +29,7 @@ type CompiledTemplate struct {
 	ID       string
 }
 
+// TransformError wraps transformation errors with context
 type TransformError struct {
 	Message string
 	Err     error
@@ -54,6 +58,14 @@ func templateFuncs() template.FuncMap {
 		},
 		"now": func() string {
 			return time.Now().UTC().Format(time.RFC3339)
+		},
+		"uuid7": func() string {
+			id, err := uuid.NewV7()
+			if err != nil {
+				// Fallback to V4 if V7 generation fails
+				id = uuid.New()
+			}
+			return id.String()
 		},
 		"num": func(v interface{}) string {
 			switch n := v.(type) {
