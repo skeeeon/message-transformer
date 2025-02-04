@@ -1,4 +1,5 @@
-//intnerl/mqtt/client.go
+//file: internal/mqtt/client.go
+
 package mqtt
 
 import (
@@ -10,12 +11,16 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
+
+	"message-transformer/internal/metrics"
 )
 
 // Client wraps the MQTT client functionality
 type Client struct {
-	client paho.Client
-	logger *zap.Logger
+	client   paho.Client
+	logger   *zap.Logger
+	metrics  metrics.Recorder
+	broker   string
 }
 
 // Config holds the MQTT client configuration
@@ -43,8 +48,18 @@ type ReconnectConfig struct {
 	MaxRetries int
 }
 
-// New creates a new MQTT client
-func New(cfg Config, logger *zap.Logger) (*Client, error) {
+// New creates a new MQTT client with metrics recording
+func New(cfg Config, logger *zap.Logger, metricsRecorder metrics.Recorder) (*Client, error) {
+	if metricsRecorder == nil {
+		metricsRecorder = metrics.NewNoOpRecorder()
+	}
+
+	client := &Client{
+		logger:  logger,
+		metrics: metricsRecorder,
+		broker:  cfg.Broker,
+	}
+
 	opts := paho.NewClientOptions().
 		AddBroker(cfg.Broker).
 		SetClientID(cfg.ClientID).
@@ -66,34 +81,39 @@ func New(cfg Config, logger *zap.Logger) (*Client, error) {
 		opts.SetTLSConfig(tlsConfig)
 	}
 
-	// Configure connection callbacks
+	// Configure connection callbacks with metrics
 	opts.SetConnectionLostHandler(func(c paho.Client, err error) {
 		logger.Warn("MQTT connection lost", zap.Error(err))
+		client.metrics.SetMQTTConnectionStatus(false)
 	})
 
 	opts.SetOnConnectHandler(func(c paho.Client) {
 		logger.Info("MQTT connected successfully")
+		client.metrics.SetMQTTConnectionStatus(true)
 	})
 
 	opts.SetReconnectingHandler(func(c paho.Client, opts *paho.ClientOptions) {
 		logger.Info("MQTT attempting reconnection")
+		client.metrics.IncMQTTReconnections()
 	})
 
-	client := paho.NewClient(opts)
+	mqttClient := paho.NewClient(opts)
+	client.client = mqttClient
 
-	// Initial connection with retry
+	// Initial connection with retry and metrics
 	retries := 0
 	for {
-		token := client.Connect()
+		token := mqttClient.Connect()
 		if token.WaitTimeout(time.Duration(cfg.Reconnect.Initial) * time.Second) {
 			if token.Error() != nil {
 				if retries >= cfg.Reconnect.MaxRetries {
 					return nil, fmt.Errorf("failed to connect after %d retries: %w", retries, token.Error())
 				}
-				logger.Warn("Failed to connect, retrying...", 
+				logger.Warn("Failed to connect, retrying...",
 					zap.Error(token.Error()),
 					zap.Int("retry", retries+1),
 					zap.Int("maxRetries", cfg.Reconnect.MaxRetries))
+				client.metrics.SetMQTTConnectionStatus(false)
 				retries++
 				time.Sleep(time.Duration(cfg.Reconnect.Initial) * time.Second)
 				continue
@@ -103,19 +123,30 @@ func New(cfg Config, logger *zap.Logger) (*Client, error) {
 		return nil, fmt.Errorf("connection timeout")
 	}
 
-	return &Client{
-		client: client,
-		logger: logger,
-	}, nil
+	// Set initial connection status metric
+	client.metrics.SetMQTTConnectionStatus(true)
+
+	return client, nil
 }
 
-// Publish publishes a message to the specified topic
+// Publish publishes a message to the specified topic with metrics
 func (c *Client) Publish(topic string, qos int, retain bool, payload []byte) error {
+	start := time.Now()
+	c.metrics.IncMQTTPublishAttempts(topic)
+
 	token := c.client.Publish(topic, byte(qos), retain, payload)
 	if !token.WaitTimeout(10 * time.Second) {
+		c.metrics.IncMQTTPublishFailures(topic)
 		return fmt.Errorf("publish timeout")
 	}
-	return token.Error()
+
+	if err := token.Error(); err != nil {
+		c.metrics.IncMQTTPublishFailures(topic)
+		return err
+	}
+
+	c.metrics.ObserveMQTTPublishDuration(topic, time.Since(start).Seconds())
+	return nil
 }
 
 // Subscribe subscribes to the specified topic
@@ -129,10 +160,11 @@ func (c *Client) Subscribe(topic string, qos int, callback func([]byte)) error {
 	return token.Error()
 }
 
-// Close disconnects the client
+// Close disconnects the client and updates metrics
 func (c *Client) Close() {
 	if c.client.IsConnected() {
 		c.client.Disconnect(250)
+		c.metrics.SetMQTTConnectionStatus(false)
 	}
 }
 
@@ -180,7 +212,9 @@ func createTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	}, nil
 }
 
-// IsConnected returns the connection status
+// IsConnected returns the connection status and updates metrics
 func (c *Client) IsConnected() bool {
-	return c.client != nil && c.client.IsConnected()
+	connected := c.client != nil && c.client.IsConnected()
+	c.metrics.SetMQTTConnectionStatus(connected)
+	return connected
 }

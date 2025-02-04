@@ -15,11 +15,13 @@ import (
 	"go.uber.org/zap"
 
 	"message-transformer/internal/config"
+	"message-transformer/internal/metrics"
 )
 
 // Transformer handles message transformations with pre-compiled templates
 type Transformer struct {
 	logger    *zap.Logger
+	metrics   metrics.Recorder
 	templates sync.Map // thread-safe map for template access
 }
 
@@ -111,9 +113,14 @@ func templateFuncs() template.FuncMap {
 }
 
 // New creates a new transformer with pre-compiled templates
-func New(logger *zap.Logger, rules []config.Rule) (*Transformer, error) {
+func New(logger *zap.Logger, rules []config.Rule, metricsRecorder metrics.Recorder) (*Transformer, error) {
+	if metricsRecorder == nil {
+		metricsRecorder = metrics.NewNoOpRecorder()
+	}
+
 	t := &Transformer{
-		logger: logger,
+		logger:  logger,
+		metrics: metricsRecorder,
 	}
 
 	// Pre-compile all templates at startup
@@ -122,6 +129,9 @@ func New(logger *zap.Logger, rules []config.Rule) (*Transformer, error) {
 			return nil, fmt.Errorf("failed to compile template for rule %s: %w", rule.ID, err)
 		}
 	}
+
+	// Record the number of active rules
+	t.metrics.SetActiveRules(len(rules))
 
 	return t, nil
 }
@@ -132,6 +142,7 @@ func (t *Transformer) compileTemplate(id, templateStr string) error {
 		Funcs(templateFuncs()).
 		Parse(templateStr)
 	if err != nil {
+		t.metrics.IncTemplateErrors(id)
 		return err
 	}
 
@@ -144,9 +155,13 @@ func (t *Transformer) compileTemplate(id, templateStr string) error {
 
 // Transform applies a pre-compiled template transformation to the input data
 func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error) {
+	start := time.Now()
+	t.metrics.ObserveTransformInputSize(ruleID, int64(len(inputData)))
+
 	// Get pre-compiled template
 	tmplValue, exists := t.templates.Load(ruleID)
 	if !exists {
+		t.metrics.IncTransformErrors(ruleID)
 		return nil, &TransformError{
 			Message: "template not found",
 			Err:     fmt.Errorf("no template for rule %s", ruleID),
@@ -159,6 +174,7 @@ func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error)
 	decoder := json.NewDecoder(bytes.NewReader(inputData))
 	decoder.UseNumber()
 	if err := decoder.Decode(&data); err != nil {
+		t.metrics.IncTransformErrors(ruleID)
 		return nil, &TransformError{
 			Message: "failed to parse input data",
 			Err:     err,
@@ -171,6 +187,7 @@ func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error)
 	defer bufPool.Put(buf)
 
 	if err := compiledTmpl.Template.Execute(buf, data); err != nil {
+		t.metrics.IncTemplateErrors(ruleID)
 		return nil, &TransformError{
 			Message: "failed to execute template",
 			Err:     err,
@@ -180,6 +197,7 @@ func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error)
 	// Validate output is valid JSON
 	output := buf.Bytes()
 	if !json.Valid(output) {
+		t.metrics.IncTransformErrors(ruleID)
 		return nil, &TransformError{
 			Message: "template output is not valid JSON",
 			Err:     fmt.Errorf("invalid JSON output for rule %s", ruleID),
@@ -190,10 +208,16 @@ func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error)
 	result := make([]byte, len(output))
 	copy(result, output)
 
+	// Record metrics
+	duration := time.Since(start).Seconds()
+	t.metrics.ObserveTransformDuration(ruleID, duration)
+	t.metrics.ObserveTransformOutputSize(ruleID, int64(len(result)))
+
 	t.logger.Debug("Message transformed successfully",
 		zap.String("rule_id", ruleID),
 		zap.Int("input_size", len(inputData)),
-		zap.Int("output_size", len(result)))
+		zap.Int("output_size", len(result)),
+		zap.Float64("duration_ms", duration*1000))
 
 	return result, nil
 }
@@ -207,10 +231,32 @@ var bufPool = sync.Pool{
 
 // AddTemplate adds a new template at runtime (useful for dynamic rule updates)
 func (t *Transformer) AddTemplate(id, templateStr string) error {
-	return t.compileTemplate(id, templateStr)
+	err := t.compileTemplate(id, templateStr)
+	if err != nil {
+		t.metrics.IncTemplateErrors(id)
+		return err
+	}
+
+	// Update active rules count
+	count := 0
+	t.templates.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	t.metrics.SetActiveRules(count)
+
+	return nil
 }
 
 // RemoveTemplate removes a template (useful for rule cleanup)
 func (t *Transformer) RemoveTemplate(id string) {
 	t.templates.Delete(id)
+
+	// Update active rules count
+	count := 0
+	t.templates.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	t.metrics.SetActiveRules(count)
 }

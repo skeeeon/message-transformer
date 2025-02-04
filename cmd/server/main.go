@@ -14,6 +14,7 @@ import (
 
 	"message-transformer/internal/api"
 	"message-transformer/internal/config"
+	"message-transformer/internal/metrics"
 	"message-transformer/internal/mqtt"
 	"message-transformer/internal/transformer"
 	"message-transformer/pkg/logger"
@@ -43,6 +44,10 @@ func main() {
 	}
 	defer log.Sync()
 
+	// Initialize metrics recorder
+	metricsRecorder := metrics.NewPrometheusRecorder()
+	log.Info("Metrics recorder initialized")
+
 	// Load rules
 	rules, err := config.LoadRules(cfg.Rules.Directory, log)
 	if err != nil {
@@ -50,13 +55,13 @@ func main() {
 	}
 	log.Info("Rules loaded successfully", zap.Int("count", len(rules)))
 
-	// Initialize transformer with pre-compiled templates
-	transform, err := transformer.New(log, rules)
+	// Initialize transformer with metrics
+	transform, err := transformer.New(log, rules, metricsRecorder)
 	if err != nil {
 		log.Fatal("Failed to initialize transformer", zap.Error(err))
 	}
 
-	// Initialize MQTT client
+	// Initialize MQTT client with metrics
 	mqttClient, err := mqtt.New(mqtt.Config{
 		Broker:   cfg.MQTT.Broker,
 		ClientID: cfg.MQTT.ClientID,
@@ -73,18 +78,19 @@ func main() {
 			MaxDelay:   cfg.MQTT.Reconnect.MaxDelay,
 			MaxRetries: cfg.MQTT.Reconnect.MaxRetries,
 		},
-	}, log)
+	}, log, metricsRecorder)
 	if err != nil {
 		log.Fatal("Failed to initialize MQTT client", zap.Error(err))
 	}
 	defer mqttClient.Close()
 
-	// Initialize HTTP server
+	// Initialize HTTP server with metrics
 	server := api.NewServer(api.ServerConfig{
 		Logger:      log,
 		Rules:       rules,
 		Transformer: transform,
 		MQTT:        mqttClient,
+		Metrics:     metricsRecorder,
 	})
 
 	httpServer := &http.Server{

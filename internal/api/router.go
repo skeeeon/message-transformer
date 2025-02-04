@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"message-transformer/internal/config"
+	"message-transformer/internal/metrics"
 	"message-transformer/internal/mqtt"
 	"message-transformer/internal/transformer"
 )
@@ -22,6 +23,7 @@ type ServerConfig struct {
 	Rules       []config.Rule
 	Transformer *transformer.Transformer
 	MQTT        *mqtt.Client
+	Metrics     metrics.Recorder
 }
 
 // Server represents the HTTP server
@@ -32,6 +34,7 @@ type Server struct {
 	ruleMap     map[string]config.Rule
 	transformer *transformer.Transformer
 	mqtt        *mqtt.Client
+	metrics     metrics.Recorder
 	bufferPool  *sync.Pool
 }
 
@@ -43,6 +46,10 @@ func NewServer(cfg ServerConfig) *Server {
 		ruleMap[rule.API.Path] = rule
 	}
 
+	if cfg.Metrics == nil {
+		cfg.Metrics = metrics.NewNoOpRecorder()
+	}
+
 	s := &Server{
 		router:      chi.NewRouter(),
 		logger:      cfg.Logger,
@@ -50,6 +57,7 @@ func NewServer(cfg ServerConfig) *Server {
 		ruleMap:     ruleMap,
 		transformer: cfg.Transformer,
 		mqtt:        cfg.MQTT,
+		metrics:     cfg.Metrics,
 		bufferPool: &sync.Pool{
 			New: func() interface{} {
 				return make([]byte, 32*1024) // 32KB initial buffer
@@ -68,6 +76,7 @@ func (s *Server) setupMiddleware() {
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.RealIP)
 	s.router.Use(NewStructuredLogger(s.logger))
+	s.router.Use(MetricsMiddleware(s.metrics))
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.Timeout(30 * time.Second))
 	s.router.Use(middleware.AllowContentType("application/json"))
@@ -75,6 +84,9 @@ func (s *Server) setupMiddleware() {
 
 // setupRoutes configures the route handlers
 func (s *Server) setupRoutes() {
+	// Metrics endpoint
+	s.router.Handle("/metrics", PrometheusMetricsHandler())
+
 	// Health check endpoint
 	s.router.Get("/health", s.handleHealth())
 
