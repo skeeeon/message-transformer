@@ -17,20 +17,20 @@ import (
 
 // Client wraps the MQTT client functionality
 type Client struct {
-	client   paho.Client
-	logger   *zap.Logger
-	metrics  metrics.Recorder
-	broker   string
+	client  paho.Client
+	logger  *zap.Logger
+	metrics metrics.Recorder
+	broker  string
 }
 
 // Config holds the MQTT client configuration
 type Config struct {
-	Broker     string
-	ClientID   string
-	Username   string
-	Password   string
-	TLS        TLSConfig
-	Reconnect  ReconnectConfig
+	Broker    string
+	ClientID  string
+	Username  string
+	Password  string
+	TLS       TLSConfig
+	Reconnect ReconnectConfig
 }
 
 // TLSConfig holds TLS configuration
@@ -84,23 +84,22 @@ func New(cfg Config, logger *zap.Logger, metricsRecorder metrics.Recorder) (*Cli
 	// Configure connection callbacks with metrics
 	opts.SetConnectionLostHandler(func(c paho.Client, err error) {
 		logger.Warn("MQTT connection lost", zap.Error(err))
-		client.metrics.SetMQTTConnectionStatus(false)
+		client.metrics.SetMQTTConnected(false)
 	})
 
 	opts.SetOnConnectHandler(func(c paho.Client) {
 		logger.Info("MQTT connected successfully")
-		client.metrics.SetMQTTConnectionStatus(true)
+		client.metrics.SetMQTTConnected(true)
 	})
 
 	opts.SetReconnectingHandler(func(c paho.Client, opts *paho.ClientOptions) {
 		logger.Info("MQTT attempting reconnection")
-		client.metrics.IncMQTTReconnections()
 	})
 
 	mqttClient := paho.NewClient(opts)
 	client.client = mqttClient
 
-	// Initial connection with retry and metrics
+	// Initial connection with retry
 	retries := 0
 	for {
 		token := mqttClient.Connect()
@@ -113,7 +112,7 @@ func New(cfg Config, logger *zap.Logger, metricsRecorder metrics.Recorder) (*Cli
 					zap.Error(token.Error()),
 					zap.Int("retry", retries+1),
 					zap.Int("maxRetries", cfg.Reconnect.MaxRetries))
-				client.metrics.SetMQTTConnectionStatus(false)
+				client.metrics.SetMQTTConnected(false)
 				retries++
 				time.Sleep(time.Duration(cfg.Reconnect.Initial) * time.Second)
 				continue
@@ -123,29 +122,24 @@ func New(cfg Config, logger *zap.Logger, metricsRecorder metrics.Recorder) (*Cli
 		return nil, fmt.Errorf("connection timeout")
 	}
 
-	// Set initial connection status metric
-	client.metrics.SetMQTTConnectionStatus(true)
-
+	client.metrics.SetMQTTConnected(true)
 	return client, nil
 }
 
-// Publish publishes a message to the specified topic with metrics
+// Publish publishes a message to the specified topic
 func (c *Client) Publish(topic string, qos int, retain bool, payload []byte) error {
-	start := time.Now()
-	c.metrics.IncMQTTPublishAttempts(topic)
-
 	token := c.client.Publish(topic, byte(qos), retain, payload)
 	if !token.WaitTimeout(10 * time.Second) {
-		c.metrics.IncMQTTPublishFailures(topic)
+		c.metrics.IncPublishes(false)
 		return fmt.Errorf("publish timeout")
 	}
 
 	if err := token.Error(); err != nil {
-		c.metrics.IncMQTTPublishFailures(topic)
+		c.metrics.IncPublishes(false)
 		return err
 	}
 
-	c.metrics.ObserveMQTTPublishDuration(topic, time.Since(start).Seconds())
+	c.metrics.IncPublishes(true)
 	return nil
 }
 
@@ -160,12 +154,19 @@ func (c *Client) Subscribe(topic string, qos int, callback func([]byte)) error {
 	return token.Error()
 }
 
-// Close disconnects the client and updates metrics
+// Close disconnects the client
 func (c *Client) Close() {
 	if c.client.IsConnected() {
 		c.client.Disconnect(250)
-		c.metrics.SetMQTTConnectionStatus(false)
+		c.metrics.SetMQTTConnected(false)
 	}
+}
+
+// IsConnected returns the connection status
+func (c *Client) IsConnected() bool {
+	connected := c.client != nil && c.client.IsConnected()
+	c.metrics.SetMQTTConnected(connected)
+	return connected
 }
 
 // createTLSConfig creates a TLS configuration for the MQTT client
@@ -194,9 +195,9 @@ func createTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	}
 
 	return &tls.Config{
-		Certificates:       certificates,
-		RootCAs:           caCertPool,
-		MinVersion:        tls.VersionTLS12,
+		Certificates:           certificates,
+		RootCAs:               caCertPool,
+		MinVersion:            tls.VersionTLS12,
 		CurvePreferences: []tls.CurveID{
 			tls.CurveP521,
 			tls.CurveP384,
@@ -210,11 +211,4 @@ func createTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
 		},
 	}, nil
-}
-
-// IsConnected returns the connection status and updates metrics
-func (c *Client) IsConnected() bool {
-	connected := c.client != nil && c.client.IsConnected()
-	c.metrics.SetMQTTConnectionStatus(connected)
-	return connected
 }

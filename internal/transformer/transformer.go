@@ -41,6 +41,147 @@ func (e *TransformError) Error() string {
 	return fmt.Sprintf("%s: %v", e.Message, e.Err)
 }
 
+// New creates a new transformer with pre-compiled templates
+func New(logger *zap.Logger, rules []config.Rule, metricsRecorder metrics.Recorder) (*Transformer, error) {
+	if metricsRecorder == nil {
+		metricsRecorder = metrics.NewNoOpRecorder()
+	}
+
+	t := &Transformer{
+		logger:  logger,
+		metrics: metricsRecorder,
+	}
+
+	// Pre-compile all templates at startup
+	for _, rule := range rules {
+		if err := t.compileTemplate(rule.ID, rule.Transform.Template); err != nil {
+			return nil, fmt.Errorf("failed to compile template for rule %s: %w", rule.ID, err)
+		}
+	}
+
+	// Set initial active rules count
+	t.metrics.SetActiveRules(len(rules))
+
+	return t, nil
+}
+
+// compileTemplate compiles a template and stores it in the sync.Map
+func (t *Transformer) compileTemplate(id, templateStr string) error {
+	tmpl, err := template.New(id).
+		Funcs(templateFuncs()).
+		Parse(templateStr)
+	if err != nil {
+		t.metrics.IncTransforms(id, false)
+		return fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	t.templates.Store(id, &CompiledTemplate{
+		Template: tmpl,
+		ID:       id,
+	})
+	return nil
+}
+
+// Transform applies a pre-compiled template transformation to the input data
+func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error) {
+	// Get pre-compiled template
+	tmplValue, exists := t.templates.Load(ruleID)
+	if !exists {
+		t.metrics.IncTransforms(ruleID, false)
+		return nil, &TransformError{
+			Message: "template not found",
+			Err:     fmt.Errorf("no template for rule %s", ruleID),
+		}
+	}
+	compiledTmpl := tmplValue.(*CompiledTemplate)
+
+	// Parse input data using a decoder for precise number handling
+	var data map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(inputData))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
+		t.metrics.IncTransforms(ruleID, false)
+		return nil, &TransformError{
+			Message: "failed to parse input data",
+			Err:     err,
+		}
+	}
+
+	// Execute template with buffer pool for efficiency
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if err := compiledTmpl.Template.Execute(buf, data); err != nil {
+		t.metrics.IncTransforms(ruleID, false)
+		return nil, &TransformError{
+			Message: "failed to execute template",
+			Err:     err,
+		}
+	}
+
+	// Validate output is valid JSON
+	output := buf.Bytes()
+	if !json.Valid(output) {
+		t.metrics.IncTransforms(ruleID, false)
+		return nil, &TransformError{
+			Message: "template output is not valid JSON",
+			Err:     fmt.Errorf("invalid JSON output for rule %s", ruleID),
+		}
+	}
+
+	// Create a copy of the output since we're returning the buffer to the pool
+	result := make([]byte, len(output))
+	copy(result, output)
+
+	// Record successful transformation
+	t.metrics.IncTransforms(ruleID, true)
+
+	t.logger.Debug("Message transformed successfully",
+		zap.String("rule_id", ruleID),
+		zap.Int("input_size", len(inputData)),
+		zap.Int("output_size", len(result)))
+
+	return result, nil
+}
+
+// AddTemplate adds a new template at runtime
+func (t *Transformer) AddTemplate(id, templateStr string) error {
+	if err := t.compileTemplate(id, templateStr); err != nil {
+		return err
+	}
+
+	// Update active rules count
+	count := 0
+	t.templates.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	t.metrics.SetActiveRules(count)
+
+	return nil
+}
+
+// RemoveTemplate removes a template
+func (t *Transformer) RemoveTemplate(id string) {
+	t.templates.Delete(id)
+
+	// Update active rules count
+	count := 0
+	t.templates.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	t.metrics.SetActiveRules(count)
+}
+
+// Buffer pool for template execution
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
 // templateFuncs returns the common template functions
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -110,153 +251,4 @@ func templateFuncs() template.FuncMap {
 			}
 		},
 	}
-}
-
-// New creates a new transformer with pre-compiled templates
-func New(logger *zap.Logger, rules []config.Rule, metricsRecorder metrics.Recorder) (*Transformer, error) {
-	if metricsRecorder == nil {
-		metricsRecorder = metrics.NewNoOpRecorder()
-	}
-
-	t := &Transformer{
-		logger:  logger,
-		metrics: metricsRecorder,
-	}
-
-	// Pre-compile all templates at startup
-	for _, rule := range rules {
-		if err := t.compileTemplate(rule.ID, rule.Transform.Template); err != nil {
-			return nil, fmt.Errorf("failed to compile template for rule %s: %w", rule.ID, err)
-		}
-	}
-
-	// Record the number of active rules
-	t.metrics.SetActiveRules(len(rules))
-
-	return t, nil
-}
-
-// compileTemplate compiles a template and stores it in the sync.Map
-func (t *Transformer) compileTemplate(id, templateStr string) error {
-	tmpl, err := template.New(id).
-		Funcs(templateFuncs()).
-		Parse(templateStr)
-	if err != nil {
-		t.metrics.IncTemplateErrors(id)
-		return err
-	}
-
-	t.templates.Store(id, &CompiledTemplate{
-		Template: tmpl,
-		ID:       id,
-	})
-	return nil
-}
-
-// Transform applies a pre-compiled template transformation to the input data
-func (t *Transformer) Transform(ruleID string, inputData []byte) ([]byte, error) {
-	start := time.Now()
-	t.metrics.ObserveTransformInputSize(ruleID, int64(len(inputData)))
-
-	// Get pre-compiled template
-	tmplValue, exists := t.templates.Load(ruleID)
-	if !exists {
-		t.metrics.IncTransformErrors(ruleID)
-		return nil, &TransformError{
-			Message: "template not found",
-			Err:     fmt.Errorf("no template for rule %s", ruleID),
-		}
-	}
-	compiledTmpl := tmplValue.(*CompiledTemplate)
-
-	// Parse input data using a decoder for precise number handling
-	var data map[string]interface{}
-	decoder := json.NewDecoder(bytes.NewReader(inputData))
-	decoder.UseNumber()
-	if err := decoder.Decode(&data); err != nil {
-		t.metrics.IncTransformErrors(ruleID)
-		return nil, &TransformError{
-			Message: "failed to parse input data",
-			Err:     err,
-		}
-	}
-
-	// Execute template with buffer pool for efficiency
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer bufPool.Put(buf)
-
-	if err := compiledTmpl.Template.Execute(buf, data); err != nil {
-		t.metrics.IncTemplateErrors(ruleID)
-		return nil, &TransformError{
-			Message: "failed to execute template",
-			Err:     err,
-		}
-	}
-
-	// Validate output is valid JSON
-	output := buf.Bytes()
-	if !json.Valid(output) {
-		t.metrics.IncTransformErrors(ruleID)
-		return nil, &TransformError{
-			Message: "template output is not valid JSON",
-			Err:     fmt.Errorf("invalid JSON output for rule %s", ruleID),
-		}
-	}
-
-	// Create a copy of the output since we're returning the buffer to the pool
-	result := make([]byte, len(output))
-	copy(result, output)
-
-	// Record metrics
-	duration := time.Since(start).Seconds()
-	t.metrics.ObserveTransformDuration(ruleID, duration)
-	t.metrics.ObserveTransformOutputSize(ruleID, int64(len(result)))
-
-	t.logger.Debug("Message transformed successfully",
-		zap.String("rule_id", ruleID),
-		zap.Int("input_size", len(inputData)),
-		zap.Int("output_size", len(result)),
-		zap.Float64("duration_ms", duration*1000))
-
-	return result, nil
-}
-
-// Buffer pool for template execution
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		return &bytes.Buffer{}
-	},
-}
-
-// AddTemplate adds a new template at runtime (useful for dynamic rule updates)
-func (t *Transformer) AddTemplate(id, templateStr string) error {
-	err := t.compileTemplate(id, templateStr)
-	if err != nil {
-		t.metrics.IncTemplateErrors(id)
-		return err
-	}
-
-	// Update active rules count
-	count := 0
-	t.templates.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	t.metrics.SetActiveRules(count)
-
-	return nil
-}
-
-// RemoveTemplate removes a template (useful for rule cleanup)
-func (t *Transformer) RemoveTemplate(id string) {
-	t.templates.Delete(id)
-
-	// Update active rules count
-	count := 0
-	t.templates.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	t.metrics.SetActiveRules(count)
 }

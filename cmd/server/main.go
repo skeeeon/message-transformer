@@ -82,7 +82,6 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to initialize MQTT client", zap.Error(err))
 	}
-	defer mqttClient.Close()
 
 	// Initialize HTTP server with metrics
 	server := api.NewServer(api.ServerConfig{
@@ -123,6 +122,13 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
+	// Update metrics before shutdown
+	server.Shutdown()
+
+	// Close MQTT client (this will update MQTT connection metric)
+	mqttClient.Close()
+
+	// Shutdown HTTP server
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("HTTP server shutdown failed", zap.Error(err))
 	}

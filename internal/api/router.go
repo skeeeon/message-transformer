@@ -68,6 +68,9 @@ func NewServer(cfg ServerConfig) *Server {
 	s.setupMiddleware()
 	s.setupRoutes()
 
+	// Set service as up
+	s.metrics.SetUp(true)
+
 	return s
 }
 
@@ -111,4 +114,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetRule(path string) (config.Rule, bool) {
 	rule, exists := s.ruleMap[path]
 	return rule, exists
+}
+
+// Shutdown updates metrics for graceful shutdown
+func (s *Server) Shutdown() {
+	s.metrics.SetUp(false)
 }

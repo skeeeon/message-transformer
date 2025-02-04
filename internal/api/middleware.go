@@ -54,7 +54,11 @@ func NewStructuredLogger(logger *zap.Logger) func(next http.Handler) http.Handle
 func MetricsMiddleware(recorder metrics.Recorder) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
+			// Skip metrics for the metrics endpoint itself
+			if r.URL.Path == "/metrics" {
+				next.ServeHTTP(w, r)
+				return
+			}
 
 			// Get buffered writer or create new one if needed
 			bw, ok := w.(ResponseWriter)
@@ -62,17 +66,11 @@ func MetricsMiddleware(recorder metrics.Recorder) func(next http.Handler) http.H
 				bw = newBufferedResponseWriter(w, make([]byte, 32*1024))
 			}
 
-			// Record request size if Content-Length is set
-			if r.ContentLength > 0 {
-				recorder.ObserveRequestSize(r.URL.Path, r.ContentLength)
-			}
-
 			next.ServeHTTP(bw, r)
 
-			// Record response metrics
-			duration := time.Since(start).Seconds()
-			recorder.ObserveRequestDuration(r.URL.Path, r.Method, bw.Status(), duration)
-			recorder.ObserveResponseSize(r.URL.Path, int64(bw.BytesWritten()))
+			// Record request success based on status code
+			success := bw.Status() < 500
+			recorder.IncRequests(success)
 		})
 	}
 }

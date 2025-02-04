@@ -9,6 +9,7 @@ A Go application that transforms HTTP JSON messages to MQTT messages using confi
 - Transforms messages using Go templates
 - Publishes transformed messages to MQTT topics
 - Health check endpoint for monitoring
+- Prometheus metrics endpoint for essential operational metrics
 
 ### Template Functions
 - `{{now}}` - Current UTC timestamp in RFC3339 format
@@ -24,11 +25,22 @@ A Go application that transforms HTTP JSON messages to MQTT messages using confi
 - Configurable QoS levels (0, 1, 2)
 - Message retention control
 - Automatic reconnection handling
+- Connection status monitoring
+
+### Observability
+- Essential Prometheus metrics for operational monitoring:
+  - Request success/failure counts
+  - Transform success/failure counts by rule
+  - MQTT publish success/failure counts
+  - MQTT connection status
+  - Active rules count
+  - Service up/down status
+- Structured logging with configurable levels
+- Health check endpoint
 
 ### Configuration
 - External application configuration (app.json)
 - Rule-based message transformation (JSON files)
-- Structured logging with levels
 - MQTT connection settings
 
 ## Project Structure
@@ -46,11 +58,13 @@ message-transformer/
 ├── internal/
 │   ├── api/
 │   │   ├── handler.go             # HTTP request handlers
-│   │   ├── middleware.go          # Logging middleware
+│   │   ├── middleware.go          # Logging and metrics middleware
 │   │   └── router.go              # Chi router setup
 │   ├── config/
 │   │   ├── config.go              # Configuration handling
 │   │   └── rule.go                # Rule loading and validation
+│   ├── metrics/
+│   │   └── metrics.go             # Prometheus metrics definitions
 │   ├── mqtt/
 │   │   └── client.go              # MQTT client implementation
 │   └── transformer/
@@ -58,6 +72,42 @@ message-transformer/
 └── pkg/
     └── logger/
         └── logger.go              # Structured logging setup
+```
+
+## Metrics
+
+### Available Metrics
+
+#### HTTP Metrics
+- `message_transformer_requests_total{status="success|error"}` - Total number of HTTP requests with status
+- `message_transformer_up` - Whether the service is up (1) or down (0)
+
+#### MQTT Metrics
+- `message_transformer_mqtt_connected{broker}` - Connection status (1=connected, 0=disconnected)
+- `message_transformer_mqtt_publishes_total{status="success|error"}` - Total MQTT publish operations
+
+#### Transformer Metrics
+- `message_transformer_transforms_total{rule_id,status="success|error"}` - Total number of transformations by rule
+- `message_transformer_active_rules` - Number of active transformation rules
+
+### Accessing Metrics
+
+Metrics are exposed at the `/metrics` endpoint in Prometheus format:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+### Monitoring Integration
+
+The exposed metrics can be scraped by Prometheus and visualized using tools like Grafana.
+
+Example Prometheus scrape configuration:
+```yaml
+scrape_configs:
+  - job_name: 'message-transformer'
+    static_configs:
+      - targets: ['localhost:8080']
 ```
 
 ## Configuration
@@ -123,6 +173,7 @@ message-transformer/
 - Go 1.21 or higher
 - MQTT broker (with TLS support if needed)
 - Write access to log directory (or use stdout)
+- Prometheus for metrics collection (optional)
 
 ### Build
 ```bash
@@ -148,6 +199,20 @@ Response:
   "status": "ok",
   "mqtt_connected": true
 }
+```
+
+### Metrics
+Request:
+```bash
+curl http://localhost:8080/metrics
+```
+
+Response:
+```
+# HELP message_transformer_requests_total Total number of HTTP requests
+# TYPE message_transformer_requests_total counter
+message_transformer_requests_total{status="success"} 42
+...
 ```
 
 ### Transform Message
@@ -226,6 +291,13 @@ Response:
 - Provides service status
 - Reports MQTT connection state
 - Available at /health
+
+### Metrics Endpoint
+- Essential Prometheus metrics
+- Request success/failure tracking
+- MQTT connection monitoring
+- Transform success/failure tracking
+- Available at /metrics
 
 ### Logging
 - Structured JSON logging
