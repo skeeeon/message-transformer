@@ -16,6 +16,7 @@ A Go application that transforms HTTP JSON messages to MQTT messages using confi
 - `{{bool .field}}` - Type-safe boolean handling
 - `{{toJSON .field}}` - Object to JSON string conversion
 - `{{fromJSON .field}}` - JSON string to object parsing
+- `{{uuid7}}` - UUIDv7 generation
 
 ### MQTT Features
 - TLS support with client certificates
