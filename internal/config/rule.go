@@ -118,6 +118,9 @@ func (r *Rule) Validate() error {
 		"now": func() string {
 			return time.Now().UTC().Format(time.RFC3339)
 		},
+		"uuid7": func() string {
+			return "00000000-0000-7000-0000-000000000000"
+		},
 		"num": func(v interface{}) string {
 			switch n := v.(type) {
 			case float64:
